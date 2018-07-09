@@ -4,7 +4,11 @@
 */
 package maglev
 
-import "github.com/dchest/siphash"
+import (
+	"sort"
+
+	"github.com/dchest/siphash"
+)
 
 const (
 	SmallM = 65537
@@ -12,80 +16,171 @@ const (
 )
 
 type Table struct {
-	n            int
-	lookup       []int
-	permutations [][]uint64
+	names       []string
+	assignments []int16
+	mod         uint64
+	strength    int
+	hashes      [][]hash
 }
 
-func New(names []string, m uint64) *Table {
-	permutations := generatePermutations(names, m)
-	lookup := populate(permutations, nil)
-	return &Table{
-		n:            len(names),
-		lookup:       lookup,
-		permutations: permutations,
+type hash struct {
+	offset, skip uint32
+}
+
+func hashString(s string, seed uint64) uint64 {
+	return siphash.Hash(0xdeadbeefcafebabe, seed, []byte(s))
+}
+
+func sortNames(names []string) {
+	sort.Slice(names, func(i, j int) bool {
+		hi, hj := hashString(names[i], 0), hashString(names[j], 0)
+		return hi < hj || (hi == hj && names[i] < names[j])
+	})
+}
+
+func nextPrime(num uint) uint {
+	num++
+	for !isPrime(num) {
+		num++
 	}
+	return num
 }
 
-func (t *Table) Lookup(key uint64) int {
-	return t.lookup[key%uint64(len(t.lookup))]
+func isPrime(n uint) bool {
+	if n%2 == 0 || n%3 == 0 {
+		return false
+	}
+	i, w := uint(5), uint(2)
+	for i*i <= n {
+		if n%i == 0 {
+			return false
+		}
+		i += w
+		w = 6 - w
+	}
+	return true
 }
 
-func (t *Table) Rebuild(dead []int) {
-	t.lookup = populate(t.permutations, dead)
+func New(names []string, size uint) *Table {
+	return NewWithPermutationStrength(names, size, 3)
 }
 
-func generatePermutations(names []string, M uint64) [][]uint64 {
-	permutations := make([][]uint64, len(names))
+func NewWithPermutationStrength(names []string, size uint, strength int) *Table {
+	if strength < 1 {
+		strength = 1
+	}
+	M := uint64(nextPrime(size - 1))
+	t := &Table{
+		names:       append([]string{}, names...),
+		hashes:      make([][]hash, len(names)),
+		assignments: make([]int16, size),
+		mod:         M,
+		strength:    strength,
+	}
+	sortNames(t.names)
+	for i, name := range t.names {
+		t.hashes[i] = make([]hash, strength)
+		for j := 0; j < strength; j++ {
+			h := hashString(name, uint64(j))
+			t.hashes[i][j] = hash{uint32((h >> 32) % M), uint32((h&0xffffffff)%(M-1) + 1)}
+		}
+	}
+	t.assign()
+	return t
+}
 
-	for i, name := range names {
-		b := []byte(name)
-		h := siphash.Hash(0xdeadbeefcafebabe, 0, b)
-		offset, skip := (h>>32)%M, ((h&0xffffffff)%(M-1) + 1)
-		p := make([]uint64, M)
-		idx := offset
-		for j := uint64(0); j < M; j++ {
-			p[j] = idx
-			idx += skip
-			if idx >= M {
-				idx -= M
+func (t *Table) Lookup(key uint64) string {
+	return t.names[t.assignments[key%uint64(len(t.assignments))]]
+}
+
+func (t *Table) Rebuild(dead []string) {
+	deadSorted := append([]string{}, dead...)
+	sortNames(deadSorted)
+	deadIndexes := make([]int, len(deadSorted))
+	N := len(t.names)
+	nextIndex := 0
+	found := 0
+	for i, deadNode := range deadSorted {
+		for j := nextIndex; j < N && found < len(deadSorted); j++ {
+			if t.names[j] == deadNode {
+				deadIndexes[i] = j
+				nextIndex = j + 1
+				found++
+				break
 			}
 		}
-		permutations[i] = p
 	}
-
-	return permutations
+	t.assign()
+	if len(dead) > 0 {
+		t.reassign(deadIndexes)
+	}
 }
 
-func populate(permutation [][]uint64, dead []int) []int {
-	M := len(permutation[0])
-	N := len(permutation)
-
-	next := make([]uint64, N)
-	entry := make([]int, M)
-	for j := range entry {
-		entry[j] = -1
+func (t *Table) assign() {
+	numPartitions := len(t.assignments)
+	N := len(t.names)
+	assigned := 0
+	cursors := make([]uint32, N)
+	for partition := range t.assignments {
+		t.assignments[partition] = -1
 	}
-
-	var n int
 	for {
-		d := dead
-		for i := 0; i < N; i++ {
-			if len(d) > 0 && d[0] == i {
-				d = d[1:]
+		for node := 0; node < N; node++ {
+			t.assignments[t.nextAvailablePartition(cursors, node)] = int16(node)
+			assigned++
+			if assigned == numPartitions {
+				return
+			}
+		}
+	}
+}
+
+func (t *Table) reassign(dead []int) {
+	numPartitions := len(t.assignments)
+	N := len(t.names)
+	assigned := numPartitions
+	cursors := make([]uint32, N)
+	deadMap := make(map[int]bool, len(dead))
+	for _, node := range dead {
+		deadMap[node] = true
+	}
+	for partition, node := range t.assignments {
+		if deadMap[int(node)] {
+			t.assignments[partition] = -1
+			assigned--
+		}
+	}
+	for {
+		d := len(dead) - 1
+		for node := N - 1; node >= 0; node-- {
+			if d >= 0 && dead[d] == node {
+				d--
 				continue
 			}
-			c := permutation[i][next[i]]
-			for entry[c] >= 0 {
-				next[i]++
-				c = permutation[i][next[i]]
-			}
-			entry[c] = i
-			next[i]++
-			n++
-			if n == M {
-				return entry
+			t.assignments[t.nextAvailablePartition(cursors, node)] = int16(node)
+			assigned++
+			if assigned == numPartitions {
+				return
 			}
 		}
 	}
+}
+
+func (t *Table) nextAvailablePartition(cursors []uint32, node int) uint {
+	numPartitions := uint(len(t.assignments))
+	partition := t.permute(cursors[node], t.hashes[node])
+	cursors[node]++
+	for partition > numPartitions-1 || t.assignments[partition] >= 0 {
+		partition = t.permute(cursors[node], t.hashes[node])
+		cursors[node]++
+	}
+	return partition
+}
+
+func (t *Table) permute(cursor uint32, hashes []hash) uint {
+	c := uint64(cursor)
+	for _, h := range hashes {
+		c = (uint64(h.offset) + uint64(h.skip)*c) % t.mod
+	}
+	return uint(c)
 }
