@@ -142,17 +142,14 @@ func New(names []string, partitions uint, args ...Option) *Table {
 }
 
 func (t *Table) Lookup(key uint64) string {
-	var node int
 	if len(t.assignments) == 0 {
-		goto notFound
+		return ""
 	}
-	node = int(t.assignments[key%uint64(len(t.assignments))])
+	node := int(t.assignments[key%uint64(len(t.assignments))])
 	if node < 0 || node >= len(t.names) {
-		goto notFound
+		return ""
 	}
 	return t.names[node]
-notFound:
-	return ""
 }
 
 func (t *Table) PartitionOwner(partition uint) string {
