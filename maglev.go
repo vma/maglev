@@ -1,7 +1,3 @@
-// Package maglev implements maglev consistent hashing
-/*
-   http://research.google.com/pubs/pub44824.html
-*/
 package maglev
 
 import (
@@ -33,20 +29,6 @@ type options struct {
 	permutationRounds int
 	mod               uint64
 	hashKey           uint64
-}
-
-type Option func(*options)
-
-func WithPermutationRounds(rounds int) Option {
-	return func(opts *options) { opts.permutationRounds = rounds }
-}
-
-func WithModulus(mod uint64) Option {
-	return func(opts *options) { opts.mod = mod }
-}
-
-func WithHashKey(key uint64) Option {
-	return func(opt *options) { opt.hashKey = key }
 }
 
 func hashString(s string, hashKey uint64, seed uint64) uint64 {
@@ -116,14 +98,11 @@ outer:
 	}
 }
 
-func New(names []string, partitions uint, args ...Option) *Table {
+func New(names []string, partitions uint) *Table {
 	opts := &options{
 		permutationRounds: 3,
 		mod:               SmallM,
 		hashKey:           0xdeadbeefcafebabe,
-	}
-	for _, arg := range args {
-		arg(opts)
 	}
 	if opts.mod < uint64(partitions) {
 		opts.mod = uint64(nextPrime(partitions - 1))
@@ -156,7 +135,7 @@ func (t *Table) Add(names ...string) {
 		return
 	}
 	t.initialize()
-	t.Rebuild(deduplicate(names, t.getDeadNames(), true))
+	t.rebuild(deduplicate(names, t.getDeadNames(), true))
 }
 
 func (t *Table) Remove(names ...string) {
@@ -165,10 +144,26 @@ func (t *Table) Remove(names ...string) {
 	if len(dead) == originalDeadCount {
 		return
 	}
-	t.Rebuild(dead)
+	t.rebuild(dead)
 }
 
-func (t *Table) Rebuild(dead []string) {
+func (t *Table) Update(names ...string) {
+	var added, removed []string
+	for _, name := range names {
+		if !inList(name, t.names) {
+			added = append(added, name)
+		}
+	}
+	for _, name := range t.names {
+		if !inList(name, names) {
+			removed = append(removed, name)
+		}
+	}
+	t.Add(added...)
+	t.Remove(removed...)
+}
+
+func (t *Table) rebuild(dead []string) {
 	t.assign()
 	if len(dead) == 0 {
 		return
@@ -278,4 +273,13 @@ func (t *Table) nextAvailablePartition(cursors []uint32, node int) uint {
 		cursors[node]++
 	}
 	return partition
+}
+
+func inList(s string, list []string) bool {
+	for _, item := range list {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

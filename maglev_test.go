@@ -49,7 +49,7 @@ func TestDistribution(t *testing.T) {
 	t.Logf("[New]: max-assignment=%v, min-assignment=%v max-to-min=%v", max, min, float64(max)/float64(min))
 
 	originalTable := table
-	originalTable.Rebuild(nil)
+	originalTable.rebuild(nil)
 
 	table = New(originalTable.names, partitions)
 	table.Remove("backend-13")
